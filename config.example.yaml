@@ -1,0 +1,36 @@
+# Harbor Proxy Configuration Example
+# Save as config.yaml and use with: ./harbor-proxy --config config.yaml
+
+# Harbor target URL (required)
+harbor_target: "https://harbor.example.com"
+
+# Proxy listen address (default: :8099)
+proxy_listen: ":8099"
+
+# Host to repository prefix mapping
+# YAML format (for config file):
+host_prefix_map:
+  hosta.example.com: "a-"
+  hostb.example.com: "b-"
+  hostc.example.com: "c-"
+
+# Environment variable format:
+# HARBOR_PROXY_HOST_PREFIX_MAP="hosta.example.com=a-,hostb.example.com=b-,hostc.example.com=c-"
+
+# Skip TLS certificate verification for backend (default: true, set to false in production)
+tls_insecure: true
+
+# Enable TLS/HTTPS for proxy server (default: false)
+tls_enabled: false
+# tls_cert_file: "/path/to/cert.pem"
+# tls_key_file: "/path/to/key.pem"
+
+# Log level (trace, debug, info, warn, error, fatal, panic)
+# Default: info
+log_level: info
+
+# pprof profiling server listen address (optional)
+# Enable performance profiling on a separate HTTP port
+# Leave empty to disable pprof
+# Example: ":6060" or "127.0.0.1:6060" (recommended for security)
+# pprof_listen: ":6060"
