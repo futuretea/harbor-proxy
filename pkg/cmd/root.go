@@ -1,15 +1,21 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/futuereta/harbor-proxy/pkg/config"
 	"github.com/futuereta/harbor-proxy/pkg/proxy"
@@ -123,6 +129,7 @@ func runProxy(cfgFile string) error {
 	}
 
 	// Start pprof server on separate port if enabled
+	var pprofServer *http.Server
 	if cfg.PprofListen != "" {
 		pprofMux := http.NewServeMux()
 		pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -131,11 +138,16 @@ func runProxy(cfgFile string) error {
 		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
+		pprofServer = &http.Server{
+			Addr:    cfg.PprofListen,
+			Handler: pprofMux,
+		}
+
 		go func() {
 			log.Info().
 				Str("addr", cfg.PprofListen).
 				Msg("pprof server enabled")
-			if err := http.ListenAndServe(cfg.PprofListen, pprofMux); err != nil {
+			if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Error().Err(err).Msg("pprof server error")
 			}
 		}()
@@ -143,24 +155,88 @@ func runProxy(cfgFile string) error {
 
 	// Start HTTP/HTTPS server with a new ServeMux (without pprof handlers)
 	proxyMux := http.NewServeMux()
+	// Prometheus metrics endpoint (no auth required)
+	proxyMux.Handle("/metrics", promhttp.Handler())
+	// Health check endpoints (no auth required)
+	proxyMux.HandleFunc("/healthz", p.HealthHandler)
+	proxyMux.HandleFunc("/readyz", p.ReadinessHandler)
+	// Main proxy handler
 	proxyMux.HandleFunc("/", p.ServeHTTP)
 
-	if cfg.TLSEnabled {
-		log.Info().
-			Str("cert", cfg.TLSCertFile).
-			Str("key", cfg.TLSKeyFile).
-			Msg("Serving HTTPS")
-		if err := http.ListenAndServeTLS(cfg.ProxyListen, cfg.TLSCertFile, cfg.TLSKeyFile, proxyMux); err != nil {
-			return fmt.Errorf("HTTPS server error: %w", err)
-		}
-	} else {
-		log.Info().Msg("Serving HTTP")
-		if err := http.ListenAndServe(cfg.ProxyListen, proxyMux); err != nil {
-			return fmt.Errorf("HTTP server error: %w", err)
-		}
+	// Create server with explicit configuration for graceful shutdown
+	mainServer := &http.Server{
+		Addr:    cfg.ProxyListen,
+		Handler: proxyMux,
+		// No read/write timeout - registry blob transfers can take hours
+		// Graceful shutdown will handle in-flight requests properly
 	}
 
-	return nil
+	// Setup signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Start server in goroutine
+	serverErr := make(chan error, 1)
+	go func() {
+		if cfg.TLSEnabled {
+			log.Info().
+				Str("cert", cfg.TLSCertFile).
+				Str("key", cfg.TLSKeyFile).
+				Msg("Serving HTTPS")
+			serverErr <- mainServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+		} else {
+			log.Info().Msg("Serving HTTP")
+			serverErr <- mainServer.ListenAndServe()
+		}
+	}()
+
+	// Wait for interrupt signal or server error
+	select {
+	case sig := <-sigChan:
+		log.Info().
+			Str("signal", sig.String()).
+			Msg("Received shutdown signal, starting graceful shutdown...")
+
+		// Mark as shutting down - readiness checks will fail
+		p.SetShuttingDown()
+		log.Info().Msg("Marked as not ready, waiting for load balancer to remove backend...")
+
+		// Give load balancers time to detect we're not ready (via readiness probe)
+		// This prevents new connections from being established
+		time.Sleep(10 * time.Second)
+
+		// Create shutdown context with timeout
+		// For registry proxy, we need generous timeout for large blob transfers
+		shutdownTimeout := 5 * time.Minute
+		log.Info().
+			Dur("timeout", shutdownTimeout).
+			Msg("Waiting for active connections to complete")
+
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+
+		// Shutdown main server
+		if err := mainServer.Shutdown(ctx); err != nil {
+			log.Error().Err(err).Msg("Error during main server shutdown")
+		} else {
+			log.Info().Msg("Main server stopped gracefully")
+		}
+
+		// Shutdown pprof server if running
+		if pprofServer != nil {
+			if err := pprofServer.Shutdown(ctx); err != nil {
+				log.Error().Err(err).Msg("Error during pprof server shutdown")
+			}
+		}
+
+		return nil
+
+	case err := <-serverErr:
+		if err != nil && err != http.ErrServerClosed {
+			return fmt.Errorf("server error: %w", err)
+		}
+		return nil
+	}
 }
 
 // Execute runs the root command

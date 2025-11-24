@@ -66,9 +66,9 @@ func rewriteRepositoryPath(prefix, path string) string {
 
 // maybeRewriteTokenScope prefixes repository in the scope query for token service
 // Returns true if scope was rewritten, false otherwise
-// Optimized to minimize allocations
+// Optimized to minimize allocations and safe against panics
 func maybeRewriteTokenScope(prefix string, req *http.Request) bool {
-	if prefix == "" {
+	if prefix == "" || req == nil || req.URL == nil {
 		return false
 	}
 	if !strings.HasPrefix(req.URL.Path, tokenPath) {
@@ -87,6 +87,11 @@ func maybeRewriteTokenScope(prefix string, req *http.Request) bool {
 		return false
 	}
 	scopeStart += 6 // len("scope=")
+
+	// Bounds check to prevent panic
+	if scopeStart >= len(rawQuery) {
+		return false
+	}
 
 	// Find the end of scope value (either & or end of string)
 	scopeEnd := strings.Index(rawQuery[scopeStart:], "&")
@@ -111,6 +116,10 @@ func maybeRewriteTokenScope(prefix string, req *http.Request) bool {
 	// Find repository name between first and second colon
 	// Format: repository:project/name:pull,push
 	firstColon := len(scopeRepository) // Position after "repository:"
+	if firstColon >= len(scope) {
+		return false
+	}
+
 	secondColon := strings.Index(scope[firstColon:], ":")
 	if secondColon == -1 {
 		return false
@@ -133,6 +142,12 @@ func maybeRewriteTokenScope(prefix string, req *http.Request) bool {
 
 	// Replace scope in query string
 	newScopeEncoded := url.QueryEscape(newScope)
+
+	// Bounds check before string slicing
+	if scopeStart < 6 {
+		return false
+	}
+
 	if scopeEnd == -1 {
 		req.URL.RawQuery = rawQuery[:scopeStart-6] + "scope=" + newScopeEncoded
 	} else {

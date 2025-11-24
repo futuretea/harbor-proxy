@@ -8,11 +8,13 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/futuereta/harbor-proxy/pkg/config"
+	"github.com/futuereta/harbor-proxy/pkg/metrics"
 )
 
 const (
@@ -44,6 +46,7 @@ type Proxy struct {
 	reverseProxy  *httputil.ReverseProxy
 	target        *url.URL
 	hostPrefixMap map[string]string
+	shuttingDown  int32 // atomic flag for graceful shutdown
 }
 
 // New creates a new Harbor proxy instance
@@ -61,22 +64,39 @@ func New(cfg *config.Config) (*Proxy, error) {
 	// Create reverse proxy
 	reverseProxy := httputil.NewSingleHostReverseProxy(target)
 
-	// Configure TLS and transport with proper settings for proxy workload
+	// Configure TLS and transport optimized for container registry proxy
+	// Registry workload characteristics:
+	// - Large file transfers (image layers can be hundreds of MB to several GB)
+	// - High concurrency (multiple clients pulling/pushing simultaneously)
+	// - Long-lived connections (downloading large images takes time)
+	// - No total request timeout - blob transfers can take minutes/hours for multi-GB layers
 	reverseProxy.Transport = &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
+			// Timeout for establishing TCP connection only
+			Timeout:   60 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: cfg.TLSInsecure,
 		},
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		// HTTP/2 enables multiplexing multiple layer downloads over single connection
+		ForceAttemptHTTP2: true,
+		// Connection pool sizing for high concurrency
+		MaxIdleConns:        200, // Total idle connections across all hosts
+		MaxIdleConnsPerHost: 100, // Per-backend idle connections (registry clients pull layers in parallel)
+		IdleConnTimeout:     90 * time.Second,
+		// TLS handshake can be slow under load
+		TLSHandshakeTimeout: 15 * time.Second,
+		// Wait time for response headers - should be quick even for large blobs
+		ResponseHeaderTimeout: 30 * time.Second,
+		// Expect-Continue for large uploads (image push)
+		ExpectContinueTimeout: 2 * time.Second,
+		// Disable compression - container images are already compressed
+		DisableCompression: true,
+		// Buffer sizes for large file transfers
+		WriteBufferSize: 64 * 1024, // 64KB write buffer
+		ReadBufferSize:  64 * 1024, // 64KB read buffer
 	}
 
 	// Set up request director
@@ -111,6 +131,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		req.URL.Path = rewriteRepositoryPath(prefix, req.URL.Path)
 
 		if originalPath != req.URL.Path {
+			metrics.PathRewritesTotal.Inc()
 			log.Debug().
 				Str("req_id", reqID).
 				Str("original_path", originalPath).
@@ -158,11 +179,14 @@ func New(cfg *config.Config) (*Proxy, error) {
 		req.Header.Set(headerHost, target.Host)
 
 		// For token service, adjust scope query
-		if maybeRewriteTokenScope(prefix, req) && log.Debug().Enabled() {
-			log.Debug().
-				Str("req_id", reqID).
-				Str("prefix", prefix).
-				Msg("  ⤷ scope rewritten")
+		if maybeRewriteTokenScope(prefix, req) {
+			metrics.ScopeRewritesTotal.Inc()
+			if log.Debug().Enabled() {
+				log.Debug().
+					Str("req_id", reqID).
+					Str("prefix", prefix).
+					Msg("  ⤷ scope rewritten")
+			}
 		}
 	}
 
@@ -247,4 +271,10 @@ func New(cfg *config.Config) (*Proxy, error) {
 
 	proxy.reverseProxy = reverseProxy
 	return proxy, nil
+}
+
+// SetShuttingDown marks the proxy as shutting down
+// This will cause readiness checks to fail
+func (p *Proxy) SetShuttingDown() {
+	atomic.StoreInt32(&p.shuttingDown, 1)
 }
