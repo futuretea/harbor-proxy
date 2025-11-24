@@ -68,7 +68,7 @@ in your Harbor registry, enabling multi-tenancy and domain-based isolation.`,
 
 	// Proxy configuration flags
 	cmd.Flags().String("target", "", "Harbor target URL (e.g., https://harbor.example.com)")
-	cmd.Flags().String("listen", "", "Listen address (default :8099)")
+	cmd.Flags().String("listen", "", "Listen address (default :8080)")
 	cmd.Flags().String("map", "", "Host to repo prefix map (e.g., 'hosta.example.com=a-,hostb.example.com=b-')")
 	cmd.Flags().Bool("tls-insecure", true, "Skip TLS certificate verification for backend")
 	cmd.Flags().Bool("tls-enabled", false, "Enable TLS/HTTPS for proxy server")

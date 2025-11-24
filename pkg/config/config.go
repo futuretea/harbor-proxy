@@ -133,7 +133,7 @@ func LoadConfig(configPath string) (*Config, error) {
 // applyDefaults applies default values to empty configuration fields
 func applyDefaults(config *Config) {
 	if config.ProxyListen == "" {
-		config.ProxyListen = ":8099"
+		config.ProxyListen = ":8080"
 	}
 	if config.LogLevel == "" {
 		config.LogLevel = "info"
