@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 
 	"github.com/rs/zerolog/log"
@@ -20,22 +22,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Header.Set(headerXForwardedHost, r.Host)
 
-	log.Info().
+	// Generate request ID for correlation
+	reqID := generateRequestID()
+	r.Header.Set("X-Request-ID", reqID)
+
+	// Log incoming request with essential info
+	logEvent := log.Info().
+		Str("req_id", reqID).
 		Str("method", r.Method).
 		Str("path", r.URL.Path).
-		Str("host", r.Host).
-		Msg("request")
+		Str("host", r.Host)
 
-	// Debug log request details
-	log.Debug().
-		Str("method", r.Method).
-		Str("url", r.URL.String()).
-		Str("host", r.Host).
-		Str("remote_addr", r.RemoteAddr).
-		Str("user_agent", r.Header.Get("User-Agent")).
-		Str("content_type", r.Header.Get(headerContentType)).
-		Int64("content_length", r.ContentLength).
-		Msg("incoming request")
+	// Add query string if present
+	if r.URL.RawQuery != "" {
+		logEvent.Str("query", r.URL.RawQuery)
+	}
+
+	// Add remote address in debug mode
+	if log.Debug().Enabled() {
+		logEvent.Str("remote", r.RemoteAddr)
+	}
+
+	logEvent.Msg("→ request")
 
 	p.reverseProxy.ServeHTTP(w, r)
+}
+
+// generateRequestID creates a short random ID for request correlation
+func generateRequestID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }

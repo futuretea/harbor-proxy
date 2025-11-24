@@ -104,13 +104,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		// Use ToLower once to avoid multiple calls
 		hostKey := strings.ToLower(incomingHost)
 		prefix := proxy.hostPrefixMap[hostKey]
-
-		// Debug: log host mapping
-		log.Debug().
-			Str("incoming_host", incomingHost).
-			Str("prefix", prefix).
-			Int("map_size", len(proxy.hostPrefixMap)).
-			Msg("host prefix lookup")
+		reqID := req.Header.Get("X-Request-ID")
 
 		// Rewrite repository path for registry endpoints
 		originalPath := req.URL.Path
@@ -118,27 +112,44 @@ func New(cfg *config.Config) (*Proxy, error) {
 
 		if originalPath != req.URL.Path {
 			log.Debug().
+				Str("req_id", reqID).
 				Str("original_path", originalPath).
 				Str("rewritten_path", req.URL.Path).
 				Str("prefix", prefix).
-				Msg("path rewritten")
+				Msg("  ⤷ path rewritten")
 		}
 
 		// Debug log outgoing request to backend
-		authorization := req.Header.Get(headerAuthorization)
-		if len(authorization) > authorizationLogLength {
-			// Mask token for security, show first 20 chars
-			authorization = authorization[:authorizationLogLength] + "..."
+		if log.Debug().Enabled() {
+			authorization := req.Header.Get(headerAuthorization)
+			authType := ""
+			if authorization != "" {
+				if strings.HasPrefix(authorization, "Basic ") {
+					authType = "Basic"
+				} else if strings.HasPrefix(authorization, "Bearer ") {
+					authType = "Bearer"
+				} else {
+					authType = "Unknown"
+				}
+			}
+
+			logEvent := log.Debug().
+				Str("req_id", reqID).
+				Str("backend", target.Host).
+				Str("path", req.URL.Path)
+
+			if authType != "" {
+				logEvent.Str("auth", authType)
+			}
+			if req.URL.RawQuery != "" {
+				logEvent.Str("query", req.URL.RawQuery)
+			}
+			if prefix != "" {
+				logEvent.Str("prefix", prefix)
+			}
+
+			logEvent.Msg("  ⤷ backend")
 		}
-		log.Debug().
-			Str("backend_url", target.String()).
-			Str("backend_path", req.URL.Path).
-			Str("backend_host", target.Host).
-			Str("client_host", incomingHost).
-			Str("prefix", prefix).
-			Str("authorization", authorization).
-			Str("query", req.URL.RawQuery).
-			Msg("proxying to backend")
 
 		// CRITICAL: Set Host header to backend target host
 		// This ensures Harbor/Ingress always sees the same host regardless of client
@@ -147,7 +158,12 @@ func New(cfg *config.Config) (*Proxy, error) {
 		req.Header.Set(headerHost, target.Host)
 
 		// For token service, adjust scope query
-		maybeRewriteTokenScope(prefix, req)
+		if maybeRewriteTokenScope(prefix, req) && log.Debug().Enabled() {
+			log.Debug().
+				Str("req_id", reqID).
+				Str("prefix", prefix).
+				Msg("  ⤷ scope rewritten")
+		}
 	}
 
 	// Set up response modifier
@@ -160,27 +176,34 @@ func New(cfg *config.Config) (*Proxy, error) {
 		if clientHost == "" {
 			clientHost = resp.Request.Host
 		}
+		reqID := resp.Request.Header.Get("X-Request-ID")
 
-		// Debug log backend response
-		log.Debug().
-			Int("status_code", resp.StatusCode).
-			Str("status", resp.Status).
-			Str("content_type", resp.Header.Get(headerContentType)).
-			Int64("content_length", resp.ContentLength).
-			Str("www_authenticate", resp.Header.Get(headerWwwAuth)).
-			Str("location", resp.Header.Get(headerLocation)).
-			Msg("backend response")
+		// Log response status (info for errors, debug for success)
+		if resp.StatusCode >= 400 {
+			log.Info().
+				Str("req_id", reqID).
+				Int("status", resp.StatusCode).
+				Str("path", resp.Request.URL.Path).
+				Msg("← error response")
+		} else if log.Debug().Enabled() {
+			log.Debug().
+				Str("req_id", reqID).
+				Int("status", resp.StatusCode).
+				Str("content_type", resp.Header.Get(headerContentType)).
+				Msg("← response")
+		}
 
 		// Www-Authenticate realm should point to our proxy host
 		// Only rewrite Bearer token authentication, preserve Basic auth as-is
 		if wa := resp.Header.Get(headerWwwAuth); wa != "" && strings.HasPrefix(wa, authPrefixBearer) {
-			originalWA := wa
 			resp.Header.Del(headerWwwAuth)
 			resp.Header.Set(headerWwwAuth, fmt.Sprintf(tokenServiceRealm, proto, clientHost))
-			log.Debug().
-				Str("original", originalWA).
-				Str("rewritten", resp.Header.Get(headerWwwAuth)).
-				Msg("www-authenticate header rewritten")
+			if log.Debug().Enabled() {
+				log.Debug().
+					Str("req_id", reqID).
+					Str("realm", fmt.Sprintf("%s://%s/service/token", proto, clientHost)).
+					Msg("  ⤷ www-authenticate rewritten")
+			}
 		}
 
 		// Rewrite Location header (uploads/manifests redirect)
@@ -202,17 +225,17 @@ func New(cfg *config.Config) (*Proxy, error) {
 					locationURL.Host = clientHost
 					newLocation := locationURL.String()
 					resp.Header.Set(headerLocation, newLocation)
-					log.Debug().
-						Str("original", location).
-						Str("rewritten", newLocation).
-						Str("target_scheme", target.Scheme).
-						Str("client_proto", proto).
-						Str("final_scheme", scheme).
-						Msg("location header rewritten")
+					if log.Debug().Enabled() {
+						log.Debug().
+							Str("req_id", reqID).
+							Str("location", newLocation).
+							Msg("  ⤷ location rewritten")
+					}
 				}
 				// If it's a relative URL, leave it as is
 			} else {
 				log.Warn().
+					Str("req_id", reqID).
 					Err(err).
 					Str("location", location).
 					Msg("failed to parse location header")

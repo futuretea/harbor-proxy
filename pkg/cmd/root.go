@@ -101,13 +101,26 @@ func runProxy(cfgFile string) error {
 
 	// Log startup information
 	prefixMap := cfg.GetHostPrefixMap()
+
+	// Create a formatted string showing the host mappings
+	var mappings []string
+	for host, prefix := range prefixMap {
+		mappings = append(mappings, fmt.Sprintf("%s → %s", host, prefix))
+	}
+
 	log.Info().
 		Str("listen", cfg.ProxyListen).
 		Str("target", cfg.HarborTarget).
-		Int("hosts", len(prefixMap)).
-		Bool("tls_insecure", cfg.TLSInsecure).
-		Bool("tls_enabled", cfg.TLSEnabled).
-		Msg("starting harbor-proxy")
+		Bool("tls", cfg.TLSEnabled).
+		Str("log_level", cfg.LogLevel).
+		Msg("Starting harbor-proxy")
+
+	if len(mappings) > 0 {
+		log.Info().
+			Int("count", len(mappings)).
+			Strs("mappings", mappings).
+			Msg("Host mappings configured")
+	}
 
 	// Start pprof server on separate port if enabled
 	if cfg.PprofListen != "" {
@@ -120,8 +133,8 @@ func runProxy(cfgFile string) error {
 
 		go func() {
 			log.Info().
-				Str("pprof_listen", cfg.PprofListen).
-				Msg("starting pprof server")
+				Str("addr", cfg.PprofListen).
+				Msg("pprof server enabled")
 			if err := http.ListenAndServe(cfg.PprofListen, pprofMux); err != nil {
 				log.Error().Err(err).Msg("pprof server error")
 			}
@@ -132,18 +145,16 @@ func runProxy(cfgFile string) error {
 	proxyMux := http.NewServeMux()
 	proxyMux.HandleFunc("/", p.ServeHTTP)
 
-	log.Info().Msg("harbor-proxy is running")
-
 	if cfg.TLSEnabled {
 		log.Info().
 			Str("cert", cfg.TLSCertFile).
 			Str("key", cfg.TLSKeyFile).
-			Msg("starting HTTPS server")
+			Msg("Serving HTTPS")
 		if err := http.ListenAndServeTLS(cfg.ProxyListen, cfg.TLSCertFile, cfg.TLSKeyFile, proxyMux); err != nil {
 			return fmt.Errorf("HTTPS server error: %w", err)
 		}
 	} else {
-		log.Info().Msg("starting HTTP server")
+		log.Info().Msg("Serving HTTP")
 		if err := http.ListenAndServe(cfg.ProxyListen, proxyMux); err != nil {
 			return fmt.Errorf("HTTP server error: %w", err)
 		}

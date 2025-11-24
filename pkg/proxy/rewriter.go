@@ -2,9 +2,8 @@ package proxy
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
-
-	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -66,38 +65,78 @@ func rewriteRepositoryPath(prefix, path string) string {
 }
 
 // maybeRewriteTokenScope prefixes repository in the scope query for token service
-func maybeRewriteTokenScope(prefix string, req *http.Request) {
+// Returns true if scope was rewritten, false otherwise
+// Optimized to minimize allocations
+func maybeRewriteTokenScope(prefix string, req *http.Request) bool {
 	if prefix == "" {
-		return
+		return false
 	}
 	if !strings.HasPrefix(req.URL.Path, tokenPath) {
-		return
+		return false
 	}
-	q := req.URL.Query()
-	scope := q.Get("scope")
-	// scope format examples: repository:project/name:pull
+
+	// Get scope from query string directly to avoid url.Values allocation
+	rawQuery := req.URL.RawQuery
+	if rawQuery == "" {
+		return false
+	}
+
+	// Find scope parameter manually to avoid Query() allocation
+	scopeStart := strings.Index(rawQuery, "scope=")
+	if scopeStart == -1 {
+		return false
+	}
+	scopeStart += 6 // len("scope=")
+
+	// Find the end of scope value (either & or end of string)
+	scopeEnd := strings.Index(rawQuery[scopeStart:], "&")
+	var scopeEncoded string
+	if scopeEnd == -1 {
+		scopeEncoded = rawQuery[scopeStart:]
+	} else {
+		scopeEncoded = rawQuery[scopeStart : scopeStart+scopeEnd]
+	}
+
+	// URL decode the scope value
+	scope, err := url.QueryUnescape(scopeEncoded)
+	if err != nil {
+		return false
+	}
+
+	// Check if it's a repository scope
 	if !strings.HasPrefix(scope, scopeRepository) {
-		return
+		return false
 	}
 
-	parts := strings.Split(scope, ":")
-	// expect ["repository", "project/name", "pull"] (len>=3)
-	if len(parts) < 3 {
-		return
+	// Find repository name between first and second colon
+	// Format: repository:project/name:pull,push
+	firstColon := len(scopeRepository) // Position after "repository:"
+	secondColon := strings.Index(scope[firstColon:], ":")
+	if secondColon == -1 {
+		return false
 	}
+	secondColon += firstColon
 
-	repo := parts[1]
+	repo := scope[firstColon:secondColon]
 	if strings.HasPrefix(repo, prefix) {
-		return // already prefixed
+		return false // already prefixed
 	}
 
-	originalScope := scope
-	parts[1] = prefix + repo
-	q.Set("scope", strings.Join(parts, ":"))
-	req.URL.RawQuery = q.Encode()
-	log.Debug().
-		Str("original_scope", originalScope).
-		Str("rewritten_scope", q.Get("scope")).
-		Str("prefix", prefix).
-		Msg("token scope rewritten")
+	// Build new scope with prefix using strings.Builder to minimize allocations
+	var builder strings.Builder
+	builder.Grow(len(scope) + len(prefix)) // Pre-allocate exact size
+	builder.WriteString(scopeRepository)
+	builder.WriteString(prefix)
+	builder.WriteString(repo)
+	builder.WriteString(scope[secondColon:]) // rest of the scope
+	newScope := builder.String()
+
+	// Replace scope in query string
+	newScopeEncoded := url.QueryEscape(newScope)
+	if scopeEnd == -1 {
+		req.URL.RawQuery = rawQuery[:scopeStart-6] + "scope=" + newScopeEncoded
+	} else {
+		req.URL.RawQuery = rawQuery[:scopeStart-6] + "scope=" + newScopeEncoded + rawQuery[scopeStart+scopeEnd:]
+	}
+	return true
 }
