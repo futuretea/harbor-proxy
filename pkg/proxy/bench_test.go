@@ -8,7 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/futuereta/harbor-proxy/pkg/config"
+	"github.com/futuretea/harbor-proxy/pkg/config"
 )
 
 func init() {

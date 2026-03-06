@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/futuereta/harbor-proxy/pkg/config"
+	"github.com/futuretea/harbor-proxy/pkg/config"
 )
 
 // TestProxyNew tests the proxy constructor

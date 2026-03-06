@@ -11,7 +11,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/futuereta/harbor-proxy/pkg/metrics"
+	"github.com/futuretea/harbor-proxy/pkg/metrics"
 )
 
 // ServeHTTP handles incoming HTTP requests

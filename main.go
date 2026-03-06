@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/rs/zerolog/log"
 
-	"github.com/futuereta/harbor-proxy/pkg/cmd"
+	"github.com/futuretea/harbor-proxy/pkg/cmd"
 )
 
 func main() {

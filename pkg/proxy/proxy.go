@@ -13,8 +13,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/futuereta/harbor-proxy/pkg/config"
-	"github.com/futuereta/harbor-proxy/pkg/metrics"
+	"github.com/futuretea/harbor-proxy/pkg/config"
+	"github.com/futuretea/harbor-proxy/pkg/metrics"
 )
 
 const (

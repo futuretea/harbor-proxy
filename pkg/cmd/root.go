@@ -17,8 +17,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/futuereta/harbor-proxy/pkg/config"
-	"github.com/futuereta/harbor-proxy/pkg/proxy"
+	"github.com/futuretea/harbor-proxy/pkg/config"
+	"github.com/futuretea/harbor-proxy/pkg/proxy"
 )
 
 // bindFlags binds command-line flags to viper configuration keys

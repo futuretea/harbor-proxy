@@ -1,4 +1,4 @@
-module github.com/futuereta/harbor-proxy
+module github.com/futuretea/harbor-proxy
 
 go 1.24.1
 
